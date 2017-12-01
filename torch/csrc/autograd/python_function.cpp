@@ -967,6 +967,11 @@ PyObject* THPFunction_register_hook(THPFunction *self, PyObject *hook)
   return torch::autograd::registerFunctionHook(self->cdata, hook);
 }
 
+PyObject* THPFunction_register_pre_hook(THPFunction *self, PyObject *hook)
+{
+  return torch::autograd::registerFunctionPreHook(self->cdata, hook);
+}
+
 static PyObject *unpack_saved_variables(
     THPFunction *self,
     std::function<PyObject*(const Variable&)> unpack_fn)
@@ -1099,6 +1104,7 @@ static struct PyMethodDef THPFunction_methods[] = {
   {(char*)"_do_backward", (PyCFunction)THPFunction_do_backward, METH_VARARGS, NULL},
   {(char*)"_register_hook_dict", (PyCFunction)THPFunction__register_hook_dict, METH_O, NULL},
   {(char*)"register_hook", (PyCFunction)THPFunction_register_hook, METH_O, NULL},
+  {(char*)"register_pre_hook", (PyCFunction)THPFunction_register_pre_hook, METH_O, NULL},
   {NULL}
 };
 

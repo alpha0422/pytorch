@@ -138,6 +138,11 @@ PyObject* THPCppFunction_register_hook(PyObject* self, PyObject* hook)
   return registerFunctionHook(fn, hook);
 }
 
+PyObject* THPCppFunction_register_pre_hook(PyObject* self, PyObject* hook)
+{
+  auto& fn = *((THPCppFunction*)self)->cdata;
+  return registerFunctionPreHook(fn, hook);
+}
 
 static struct PyMethodDef default_methods[] = {
   THP_FUNCTION_DEFAULT_METHODS,
@@ -229,6 +234,31 @@ PyObject* registerFunctionHook(Function& fn, PyObject* hook)
   if (dict == Py_None) {
     dict = PyTuple_GET_ITEM(res.get(), 0);
     fn.post_hooks.push_back(std::make_shared<PyFunctionPostHook>(dict));
+  }
+
+  PyObject* handle = PyTuple_GET_ITEM(res.get(), 1);
+  Py_INCREF(handle);
+  return handle;
+}
+
+PyObject* registerFunctionPreHook(Function& fn, PyObject* hook)
+{
+  PyObject* dict = Py_None;
+  for (auto& hook : fn.pre_hooks) {
+    if (auto pyhook = dynamic_cast<PyFunctionPreHook*>(hook.get())) {
+      dict = pyhook->dict;
+      break;
+    }
+  }
+
+  THPObjectPtr register_fn(PyObject_GetAttrString(THPFunctionClass, "_register_pre_hook"));
+  if (!register_fn) return NULL;
+  THPObjectPtr res(PyObject_CallFunctionObjArgs(register_fn.get(), dict, hook, NULL));
+  if (!res) return NULL;
+
+  if (dict == Py_None) {
+    dict = PyTuple_GET_ITEM(res.get(), 0);
+    fn.pre_hooks.push_back(std::make_shared<PyFunctionPreHook>(dict, 0));
   }
 
   PyObject* handle = PyTuple_GET_ITEM(res.get(), 1);

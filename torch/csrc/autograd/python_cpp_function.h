@@ -32,7 +32,8 @@ PyObject* CppFunction_pynew(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
 #define THP_FUNCTION_DEFAULT_METHODS \
   {(char*)"_register_hook_dict", (PyCFunction)THPCppFunction_register_hook_dict, METH_O, NULL}, \
-  {(char*)"register_hook", (PyCFunction)THPCppFunction_register_hook, METH_O, NULL}
+  {(char*)"register_hook", (PyCFunction)THPCppFunction_register_hook, METH_O, NULL}, \
+  {(char*)"register_pre_hook", (PyCFunction)THPCppFunction_register_pre_hook, METH_O, NULL}
 
 #define THP_FUNCTION_DEFAULT_PROPERTIES \
   {(char*)"next_functions", (getter)THPCppFunction_next_functions, NULL, NULL, NULL}, \
@@ -42,11 +43,13 @@ PyObject* THPCppFunction_next_functions(THPCppFunction* self, PyObject* hook);
 PyObject* THPCppFunction_requires_grad(THPCppFunction* self);
 PyObject* THPCppFunction_register_hook_dict(PyObject* self, PyObject* _var);
 PyObject* THPCppFunction_register_hook(PyObject* self, PyObject* hook);
+PyObject* THPCppFunction_register_pre_hook(PyObject* self, PyObject* hook);
 
 PyTypeObject* _initFunctionPyTypeObject(PyTypeObject& type, const char* name,
   PyGetSetDef* function_properties, PyMethodDef* function_methods);
 
 PyObject* registerFunctionHook(Function& fn, PyObject* hook);
+PyObject* registerFunctionPreHook(Function& fn, PyObject* hook);
 
 template<typename Ctor>
 PyTypeObject* createForwardFunctionPyTypeObject(PyTypeObject& type, const char* name,
