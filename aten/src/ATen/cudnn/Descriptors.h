@@ -103,11 +103,15 @@ struct FilterDescriptor
 
   void set(const at::Tensor &t, int64_t pad = 0);
 
+  void print();
+
 private:
   void set(cudnnDataType_t dataType, int dim, int* size) {
     CUDNN_CHECK(cudnnSetFilterNdDescriptor(desc, dataType, CUDNN_TENSOR_NCHW, dim, size));
   }
 };
+
+std::ostream& operator<<(std::ostream & out, const FilterDescriptor& d);
 
 struct ConvolutionDescriptor
 {

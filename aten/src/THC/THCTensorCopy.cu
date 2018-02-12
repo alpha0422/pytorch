@@ -206,3 +206,119 @@ THC_copyTensor(THCState* state, TensorTypeDst* dst, TensorTypeSrc* src) {
 
 #include "generic/THCTensorCopy.cu"
 #include "THCGenerateAllTypes.h"
+
+__global__ void print4dTensor(__half *tensor, int N, int C, int H, int W) {
+    printf("# N:%d C:%d H:%d W:%d\n", N, C, H, W);
+    for (int n=0; n<N; n++) {
+        for (int c=0; c<C; c++) {
+            printf("===%d  %d===\n", n, c);
+            for (int h=0; h<H; h++) {
+                for (int w=0; w<W; w++) {
+                    printf("%.2f ", __half2float(tensor[n*C*H*W + c*H*W + h*W + w]));
+                }
+                printf("\n");
+            }
+        }
+    }
+}
+
+template <typename TensorType>
+#if __CUDA_ARCH__ >= 350
+__launch_bounds__(512, 4)
+#endif
+__global__ void
+THC_expandTensor(THCState* state,
+                 TensorType* dst,
+                 TensorType* src,
+                 uint64_t NCHW,
+                 uint64_t CHW,
+                 uint64_t HW,
+                 uint64_t W,
+                 uint64_t CHqWq,
+                 uint64_t HqWq,
+                 uint64_t UWq,
+                 uint64_t V)  {
+    uint64_t srcIndex = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (srcIndex >= NCHW)  return;
+
+    uint64_t n = srcIndex / CHW;
+    uint64_t c = srcIndex % CHW / HW;
+    uint64_t h = srcIndex % HW / W;
+    uint64_t w = srcIndex % W;
+
+    uint64_t dstIndex = n * CHqWq + c * HqWq + h * UWq + w * V;
+
+    //printf("%ld copy to %ld, n:%ld c:%ld h:%ld w:%ld\n", srcIndex, dstIndex, n, c, h, w);
+
+    dst[dstIndex] = src[srcIndex];
+}
+
+void
+THC_expandGrad(THCState* state,
+               THCudaHalfTensor* dst,
+               THCudaHalfTensor* src,
+               uint64_t N,
+               uint64_t C,
+               uint64_t H,
+               uint64_t W,
+               uint64_t U,
+               uint64_t V,
+               uint64_t Hq,
+               uint64_t Wq)  {
+    //printf("N:%ld C:%ld H:%ld W:%ld U:%ld V:%ld Hq:%ld Wq:%ld\n", N, C, H, W, U, V, Hq, Wq);
+    //print4dTensor<<<1, 1>>>(THCudaHalfTensor_data(state, src), N, C, H, W);
+    //print4dTensor<<<1, 1>>>(THCudaHalfTensor_data(state, dst), N, C, Hq, Wq);
+
+    dim3 grid((N*C*H*W + static_cast<uint64_t>(512 - 1)) / static_cast<uint64_t>(512));
+    dim3 block(512);
+    THC_expandTensor<half><<<grid, block>>>(state, dst->storage->data, src->storage->data, N*C*H*W, C*H*W, H*W, W, C*Hq*Wq, Hq*Wq, U*Wq, V);
+
+    //print4dTensor<<<1, 1>>>(THCudaHalfTensor_data(state, dst), N, C, Hq, Wq);
+}
+
+template <typename TensorType>
+#if __CUDA_ARCH__ >= 350
+__launch_bounds__(512, 4)
+#endif
+__global__ void
+THC_reverseWeightKernel(THCState* state,
+                        TensorType* dst,
+                        TensorType* src,
+                        uint64_t KCRS,
+                        uint64_t CRS,
+                        uint64_t RS,
+                        uint64_t R,
+                        uint64_t S,
+                        uint64_t KRS) {
+    uint64_t srcIndex = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (srcIndex >= KCRS)  return;
+
+    uint64_t k = srcIndex / CRS;
+    uint64_t c = srcIndex % CRS / RS;
+    uint64_t r = srcIndex % RS / S;
+    uint64_t s = srcIndex % S;
+
+    uint64_t dstIndex = c * KRS + k * RS + (R-r-1) * S + (S-s-1);
+
+    dst[dstIndex] = src[srcIndex];
+}
+
+void
+THC_reverseWeight(THCState* state,
+                  THCudaHalfTensor* dst,
+                  THCudaHalfTensor* src,
+                  uint64_t C,
+                  uint64_t K,
+                  uint64_t R,
+                  uint64_t S)  {
+    //print4dTensor<<<1, 1>>>(THCudaHalfTensor_data(state, src), C, K, R, S);
+
+    dim3 grid((C*K*R*S + static_cast<uint64_t>(512 - 1)) / static_cast<uint64_t>(512));
+    dim3 block(512);
+    THC_reverseWeightKernel<half><<<grid, block>>>(state, dst->storage->data, src->storage->data, K*C*R*S, C*R*S, R*S, R, S, K*R*S);
+    
+    //print4dTensor<<<1, 1>>>(THCudaHalfTensor_data(state, dst), K, C, R, S);
+}
+

@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <unordered_map>
 
+#include "ATen/CUDAHalfTensor.h"
+
 namespace at { namespace native {
 
 // TODO: Go through all the checking code again and make sure
@@ -869,28 +871,137 @@ void raw_cudnn_convolution_backward_out(
     IntList padding, IntList stride, IntList dilation, int64_t groups,
     bool benchmark, bool deterministic) {
 
-  auto dataType = getCudnnDataType(grad_output);
+  bool is_strided_conv = false;
+  for (size_t i=0; i!=stride.size(); i++)  {
+      if (stride[i] != 1)  {
+          is_strided_conv = true;
+          break;
+      }
+  }
 
-  ConvolutionArgs args{ grad_input, grad_output, weight };
-  args.handle = getCudnnHandle();
-  setConvolutionParams(&args.params, grad_input, weight, padding, stride, dilation, groups, deterministic);
-  args.idesc.set(grad_input);
-  args.wdesc.set(weight);
-  args.odesc.set(grad_output);
-  args.cdesc.set(dataType, grad_output.dim() - 2, args.params.padding, args.params.stride, args.params.dilation, args.params.groups);
+  bool is_half_tensor = (getCudnnDataType(weight) == CUDNN_DATA_HALF);
+  
+  //if (!(is_strided_conv && is_half_tensor))  {
+  if (!is_half_tensor)  {
+      auto dataType = getCudnnDataType(grad_output);
 
-  cudnnConvolutionBwdDataAlgo_t bwdDataAlg;
-  Workspace workspace = chooseAlgorithm(args, benchmark, &bwdDataAlg);
+      ConvolutionArgs args{ grad_input, grad_output, weight };
+      args.handle = getCudnnHandle();
+      setConvolutionParams(&args.params, grad_input, weight, padding, stride, dilation, groups, deterministic);
+      args.idesc.set(grad_input);
+      args.wdesc.set(weight);
+      args.odesc.set(grad_output);
+      args.cdesc.set(dataType, grad_output.dim() - 2, args.params.padding, args.params.stride, args.params.dilation, args.params.groups);
 
-  Constant one(dataType, 1);
-  Constant zero(dataType, 0);
+      cudnnConvolutionBwdDataAlgo_t bwdDataAlg;
+      Workspace workspace = chooseAlgorithm(args, benchmark, &bwdDataAlg);
 
-  CUDNN_CHECK(cudnnConvolutionBackwardData(
-      args.handle,
-      &one, args.wdesc.desc, weight.data_ptr(),
-      args.odesc.desc, grad_output.data_ptr(),
-      args.cdesc.desc, bwdDataAlg, workspace.data, workspace.size,
-      &zero, args.idesc.desc, grad_input.data_ptr()));
+      Constant one(dataType, 1);
+      Constant zero(dataType, 0);
+
+      CUDNN_CHECK(cudnnConvolutionBackwardData(
+          args.handle,
+          &one, args.wdesc.desc, weight.data_ptr(),
+          args.odesc.desc, grad_output.data_ptr(),
+          args.cdesc.desc, bwdDataAlg, workspace.data, workspace.size,
+          &zero, args.idesc.desc, grad_input.data_ptr()));
+  }
+  else {
+      assert(grad_output.ndimension() == 4);
+      assert(stride.size() == 2);
+      assert(padding.size() == 2);
+  
+      int64_t n = grad_input.sizes()[0];
+      int64_t h = grad_input.sizes()[2];
+      int64_t w = grad_input.sizes()[3];
+      int64_t k = weight.sizes()[0];
+      int64_t c = weight.sizes()[1];
+      int64_t r = weight.sizes()[2];
+      int64_t s = weight.sizes()[3];
+      int64_t u = stride[0];
+      int64_t v = stride[1];
+      int64_t padh = padding[0];
+      int64_t padw = padding[1];
+
+      int64_t ho = grad_output.sizes()[2];
+      int64_t wo = grad_output.sizes()[3];
+
+      int64_t nq = n;
+      int64_t cq = k;
+      int64_t kq = c;
+      int64_t hq = ho + (ho - 1) * (u - 1) + (h + 2 * padh - r) % u;
+      int64_t wq = wo + (wo - 1) * (v - 1) + (w + 2 * padw - s) % v;
+      int64_t rq = r;
+      int64_t sq = s;
+      int64_t uq = 1;
+      int64_t vq = 1;
+      int64_t padhq = r - padh - 1;
+      int64_t padwq = s - padw - 1;
+
+      //IntList stride_t({uq, vq});
+      //IntList padding_t({padhq, padwq});
+
+      std::vector<int64_t> stride_vec;
+      stride_vec.push_back(uq);
+      stride_vec.push_back(vq);
+      IntList stride_t(stride_vec);
+      std::vector<int64_t> padq_vec;
+      padq_vec.push_back(padhq);
+      padq_vec.push_back(padwq);
+      IntList padding_t(padq_vec);
+
+      auto grad_output_expand = grad_output.type().zeros({grad_output.sizes()[0], grad_output.sizes()[1], hq, wq});
+      //std::cout << grad_input_expand.sizes()[2] << std::endl;
+      //std::cout << std::string(grad_output_expand.toString()) << std::endl;
+
+      // Copy the gradient to the right place
+      THC_expandGrad(globalContext().thc_state,
+          checked_cast_tensor<CUDAHalfTensor>(grad_output_expand.pImpl, "grad_output_expand", -1, false)->tensor,
+          checked_cast_tensor<CUDAHalfTensor>(grad_output.pImpl, "grad_output", -1, false)->tensor, n, c, ho, wo, u, v, hq, wq);
+
+      auto weight_reverse = weight.type().zeros(weight.sizes());
+
+      // Reverse the weight
+      THC_reverseWeight(globalContext().thc_state,
+          checked_cast_tensor<CUDAHalfTensor>(weight_reverse.pImpl, "weight_reverse", -1, false)->tensor,
+          checked_cast_tensor<CUDAHalfTensor>(weight.pImpl, "weight", -1, false)->tensor, c, k, r, s);
+
+      auto dataType = getCudnnDataType(grad_output);
+
+      ConvolutionArgs args{ grad_output_expand, grad_input, weight_reverse };
+      args.handle = getCudnnHandle();
+      setConvolutionParams(&args.params, grad_output_expand, weight_reverse, padding_t, stride_t, dilation, groups, deterministic);
+      args.idesc.set(grad_output_expand);
+      args.wdesc.set(weight_reverse);
+      args.odesc.set(grad_input);
+      args.cdesc.set(dataType, grad_output_expand.dim() - 2, args.params.padding, args.params.stride, args.params.dilation, args.params.groups);
+
+      // Print descriptors
+      //args.idesc.print();
+      //args.wdesc.print();
+      //args.odesc.print();
+      //std::cout << args.params.stride[0] << args.params.stride[1] << args.params.padding[0] << args.params.padding[1] << std::endl;
+
+      cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING;
+
+      using search = algorithm_search<cudnnConvolutionFwdAlgo_t>;
+      size_t workspace_size;
+      search::getWorkspaceSize(args, algo, &workspace_size);
+      Workspace workspace = Workspace(workspace_size);
+
+      Constant one(dataType, 1);
+      Constant zero(dataType, 0);
+
+      // Wait until gradient and weight finished
+      THCudaCheck(cudaDeviceSynchronize());
+
+      CUDNN_CHECK(cudnnConvolutionForward(
+        args.handle,
+        &one, args.idesc.desc, grad_output_expand.data_ptr(),
+        args.wdesc.desc, weight_reverse.data_ptr(),
+        args.cdesc.desc, algo, workspace.data, workspace.size,
+        &zero, args.odesc.desc, grad_input.data_ptr()));
+  }
 }
 
 // Backward and transpose are algorithmically equivalent, but they
