@@ -510,18 +510,22 @@ std::vector<at::Tensor> flatten_for_scatter_gather(
     for (auto j = size_t{}; j < tensor_lists[i].size(); ++j) {
       auto t = tensor_lists[i][j];
       if (!t.storage().is_alias_of(other[i].storage()) ||
-          t.storage_offset() != (j * other[i].numel())) {
+          t.storage_offset() != (tensor_lists[i][0].storage_offset() +
+          j * other[i].numel())) {
         inplace = false;
         break;
       }
     }
-    if (other[i].storage_offset() != (rank * other[i].numel())) {
+    if (other[i].storage_offset() != (tensor_lists[i][0].storage_offset() +
+        rank * other[i].numel())) {
       inplace = false;
     }
 
     if (inplace) {
       flattened[i] = at::empty({0}, other[i].options()).set_(
-          other[i].storage(), 0, world_size * other[i].numel(), {});
+          tensor_lists[i][0].storage(),
+          tensor_lists[i][0].storage_offset(),
+          world_size * other[i].numel(), {});
     } else {
       // Flatten the tensors (from all ranks) into a single big tensor.
       flattened[i] = newLikeFlat(tensor_lists, i);
@@ -727,7 +731,8 @@ std::shared_ptr<ProcessGroup::Work> ProcessGroupNCCL::allgather(
             if (outputFlattened[i][j].storage().is_alias_of(
                 outputTensors[i][j].storage()) &&
                 outputTensors[i][j].storage_offset() ==
-                (outputTensors[i][j].numel() * j)) {
+                (outputTensors[i][0].storage_offset() +
+                outputTensors[i][j].numel() * j)) {
               break;
             }
 
@@ -787,7 +792,8 @@ std::shared_ptr<ProcessGroup::Work> ProcessGroupNCCL::reduce_scatter(
             if (inputFlattened[i][j].storage().is_alias_of(
                 inputTensors[i][j].storage()) &&
                 inputTensors[i][j].storage_offset() ==
-                (inputTensors[i][j].numel() * j)) {
+                (inputTensors[i][0].storage_offset() +
+                inputTensors[i][j].numel() * j)) {
               break;
             }
 
