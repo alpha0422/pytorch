@@ -1,6 +1,7 @@
 #include <torch/csrc/autograd/python_function.h>
 
 #include <ATen/ATen.h>
+#include <torch/csrc/Stream.h>
 #include <ATen/SequenceNumber.h>
 #include <c10/util/irange.h>
 #include <pybind11/pybind11.h>
@@ -1164,6 +1165,18 @@ PyObject* THPFunction_name(PyObject* self, PyObject* noargs) {
   END_HANDLE_TH_ERRORS
 }
 
+PyObject* THPFunction_stream(PyObject* self, PyObject* noargs) {
+  HANDLE_TH_ERRORS
+  auto cdata = ((THPFunction*)self)->cdata.lock();
+  check_legacy_fn_attr_access(cdata, "stream");
+  auto opt_stream = cdata->stream();
+  if (!opt_stream.has_value()) {
+    Py_RETURN_NONE;
+  }
+  return THPStream_Wrap(opt_stream.value());
+  END_HANDLE_TH_ERRORS
+}
+
 PyObject* THPFunction_sequence_nr(PyObject* self, PyObject* noargs) {
   HANDLE_TH_ERRORS;
   auto cdata = ((THPFunction*)self)->cdata.lock();
@@ -1730,6 +1743,7 @@ static struct PyGetSetDef THPFunction_properties[] = {
 // NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
 static struct PyMethodDef THPFunction_methods[] = {
     {(char*)"name", THPFunction_name, METH_NOARGS, nullptr},
+    {(char*)"stream", THPFunction_stream, METH_NOARGS, nullptr},
     {(char*)"_sequence_nr", THPFunction_sequence_nr, METH_NOARGS, nullptr},
     {(char*)"_set_sequence_nr", THPFunction_set_sequence_nr, METH_O, nullptr},
     {(char*)"maybe_clear_saved_tensors",

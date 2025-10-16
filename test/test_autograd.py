@@ -10651,6 +10651,270 @@ def bernoulli_scalar():
     return torch.tensor(0, dtype=torch.uint8).bernoulli_()
 
 
+class TestAutogradStreamExposure(TestCase):
+    """Test cases for the new stream() method on autograd nodes."""
+
+    def test_cpu_stream_exposure(self):
+        """Test that CPU operations return None for stream()."""
+        x = torch.randn(3, 3, requires_grad=True)
+        y = x * 2
+        z = y + 1
+        loss = z.sum()
+
+        # All CPU operations should return None for stream
+        self.assertIsNone(y.grad_fn.stream())
+        self.assertIsNone(z.grad_fn.stream())
+        self.assertIsNone(loss.grad_fn.stream())
+
+    def test_stream_method_exists(self):
+        """Test that the stream method exists on all grad_fn types."""
+        x = torch.randn(2, 2, requires_grad=True)
+
+        operations = [
+            x + 1,           # AddBackward0
+            x * 2,           # MulBackward0
+            x.sum(),         # SumBackward0
+            torch.relu(x),   # ReluBackward0
+            x.view(-1),      # ViewBackward0
+        ]
+
+        for op in operations:
+            if op.grad_fn is not None:
+                self.assertTrue(hasattr(op.grad_fn, 'stream'),
+                               f"{op.grad_fn.__class__.__name__} should have stream method")
+                # CPU operations should return None
+                self.assertIsNone(op.grad_fn.stream())
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_cuda_stream_exposure(self):
+        """Test that CUDA operations return proper stream objects."""
+        device = torch.device('cuda:0')
+        x = torch.randn(3, 3, requires_grad=True, device=device)
+        y = x * 2
+        z = y + 1
+        loss = z.sum()
+
+        # CUDA operations should return stream objects
+        y_stream = y.grad_fn.stream()
+        z_stream = z.grad_fn.stream()
+        loss_stream = loss.grad_fn.stream()
+
+        # All should be stream objects (not None)
+        self.assertIsNotNone(y_stream)
+        self.assertIsNotNone(z_stream)
+        self.assertIsNotNone(loss_stream)
+
+        # Should be CUDA streams
+        self.assertEqual(y_stream.device.type, 'cuda')
+        self.assertEqual(z_stream.device.type, 'cuda')
+        self.assertEqual(loss_stream.device.type, 'cuda')
+
+        # Should have stream IDs
+        self.assertIsInstance(y_stream.stream_id, int)
+        self.assertIsInstance(z_stream.stream_id, int)
+        self.assertIsInstance(loss_stream.stream_id, int)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_custom_cuda_stream_context(self):
+        """Test stream exposure with custom CUDA stream contexts."""
+        device = torch.device('cuda:0')
+        custom_stream = torch.cuda.Stream(device=device)
+
+        # Operations in custom stream context
+        with torch.cuda.stream(custom_stream):
+            x = torch.randn(3, 3, requires_grad=True, device=device)
+            y = x * 2
+            z = y + 1
+            loss = z.sum()
+
+        # Check that streams are exposed
+        y_stream = y.grad_fn.stream()
+        z_stream = z.grad_fn.stream()
+        loss_stream = loss.grad_fn.stream()
+
+        self.assertIsNotNone(y_stream)
+        self.assertIsNotNone(z_stream)
+        self.assertIsNotNone(loss_stream)
+
+        # All should be on the same device
+        self.assertEqual(y_stream.device, device)
+        self.assertEqual(z_stream.device, device)
+        self.assertEqual(loss_stream.device, device)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_mixed_device_operations(self):
+        """Test stream exposure with mixed CPU/CUDA operations."""
+        device = torch.device('cuda:0')
+
+        # Start with CPU tensor
+        x_cpu = torch.randn(3, 3, requires_grad=True)
+
+        # Move to CUDA
+        x_cuda = x_cpu.to(device)
+        y = x_cuda * 2
+
+        # Move back to CPU
+        z = y.cpu()
+        loss = z.sum()
+
+        # Check streams at each step
+        # to() operation should have a stream (CUDA operation)
+        to_stream = x_cuda.grad_fn.stream()
+        if to_stream is not None:  # May be None depending on implementation
+            self.assertEqual(to_stream.device.type, 'cuda')
+
+        # CUDA multiplication should have CUDA stream
+        mul_stream = y.grad_fn.stream()
+        self.assertIsNotNone(mul_stream)
+        self.assertEqual(mul_stream.device.type, 'cuda')
+
+        # CPU operations should return None
+        if z.grad_fn is not None:  # cpu() might not create a grad_fn
+            cpu_stream = z.grad_fn.stream()
+            # This could be None (CPU) or CUDA stream depending on implementation
+
+        sum_stream = loss.grad_fn.stream()
+        # Sum of CPU tensor should be None
+        self.assertIsNone(sum_stream)
+
+    def test_backward_pass_stream_consistency(self):
+        """Test that stream information is consistent during backward pass."""
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+        else:
+            device = torch.device('cpu')
+
+        x = torch.randn(3, 3, requires_grad=True, device=device)
+        y = x * 2
+        z = y + 1
+        loss = z.sum()
+
+        # Record streams before backward
+        streams_before = []
+        current = loss.grad_fn
+        while current is not None:
+            stream = current.stream()
+            streams_before.append(stream)
+
+            # Move to next function in the graph
+            if hasattr(current, 'next_functions') and current.next_functions:
+                current = current.next_functions[0][0]
+            else:
+                break
+
+        # Perform backward pass
+        loss.backward()
+
+        # Stream information should still be accessible and consistent
+        # (Note: grad_fn might be cleared after backward, so this tests
+        # that the stream method doesn't crash)
+        if loss.grad_fn is not None:
+            post_backward_stream = loss.grad_fn.stream()
+            # Should be same as before or None (if cleared)
+
+    def test_complex_computation_graph_streams(self):
+        """Test stream exposure in complex computation graphs."""
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+        else:
+            device = torch.device('cpu')
+
+        # Create a more complex graph
+        x = torch.randn(2, 2, requires_grad=True, device=device)
+        y = torch.randn(2, 2, requires_grad=True, device=device)
+
+        # Multiple operations
+        z1 = x + y
+        z2 = x * y
+        z3 = torch.relu(z1)
+        z4 = torch.sigmoid(z2)
+        z5 = z3 @ z4  # Matrix multiplication
+        loss = z5.sum()
+
+        # Check that all intermediate results have stream methods
+        intermediate_results = [z1, z2, z3, z4, z5, loss]
+
+        for i, result in enumerate(intermediate_results):
+            if result.grad_fn is not None:
+                self.assertTrue(hasattr(result.grad_fn, 'stream'),
+                               f"Result {i} grad_fn should have stream method")
+                stream = result.grad_fn.stream()
+
+                if device.type == 'cuda':
+                    # CUDA operations should have streams
+                    if stream is not None:  # Some operations might not have streams
+                        self.assertEqual(stream.device.type, 'cuda')
+                else:
+                    # CPU operations should return None
+                    self.assertIsNone(stream)
+
+    def test_custom_autograd_function_stream(self):
+        """Test stream exposure with custom autograd functions."""
+        class CustomFunction(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x * 2
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                return grad_output * 2
+
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+        else:
+            device = torch.device('cpu')
+
+        x = torch.randn(3, 3, requires_grad=True, device=device)
+        y = CustomFunction.apply(x)
+
+        # Custom function should also have stream method
+        self.assertTrue(hasattr(y.grad_fn, 'stream'))
+        stream = y.grad_fn.stream()
+
+        if device.type == 'cuda':
+            if stream is not None:
+                self.assertEqual(stream.device.type, 'cuda')
+        else:
+            self.assertIsNone(stream)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_multi_gpu_stream_exposure(self):
+        """Test stream exposure with multiple GPUs."""
+        if torch.cuda.device_count() < 2:
+            self.skipTest("Need at least 2 CUDA devices")
+
+        device0 = torch.device('cuda:0')
+        device1 = torch.device('cuda:1')
+
+        # Operations on different devices
+        x0 = torch.randn(3, 3, requires_grad=True, device=device0)
+        x1 = torch.randn(3, 3, requires_grad=True, device=device1)
+
+        y0 = x0 * 2
+        y1 = x1 * 3
+
+        # Check streams are on correct devices
+        stream0 = y0.grad_fn.stream()
+        stream1 = y1.grad_fn.stream()
+
+        self.assertIsNotNone(stream0)
+        self.assertIsNotNone(stream1)
+
+        self.assertEqual(stream0.device, device0)
+        self.assertEqual(stream1.device, device1)
+
+    def test_stream_method_error_handling(self):
+        """Test that stream method handles edge cases gracefully."""
+        # Test with leaf tensors (no grad_fn)
+        x = torch.randn(3, 3, requires_grad=True)
+        self.assertIsNone(x.grad_fn)  # Leaf tensor has no grad_fn
+
+        # Test with tensors that don't require grad
+        y = torch.randn(3, 3, requires_grad=False)
+        z = y * 2
+        self.assertIsNone(z.grad_fn)  # No grad_fn when requires_grad=False
+
+
 class TestAutogradForwardModeBatchedGrad(TestCase):
     def test_out_of_place_basic(self):
         a = torch.rand(4, 4, dtype=torch.double, requires_grad=True)

@@ -49,6 +49,7 @@ TORCH_PYTHON_API PyObject* CppFunction_pynew(
        THPCppFunction_sequence_nr,                                             \
        METH_NOARGS,                                                            \
        nullptr},                                                               \
+      {(char*)"stream", THPCppFunction_stream, METH_NOARGS, nullptr},          \
   {                                                                            \
     (char*)"_set_sequence_nr", THPCppFunction_set_sequence_nr, METH_O, nullptr \
   }
@@ -98,6 +99,9 @@ TORCH_PYTHON_API PyObject* THPCppFunction_sequence_nr(
 TORCH_PYTHON_API PyObject* THPCppFunction_input_metadata(
     PyObject* self,
     void* _unused);
+TORCH_PYTHON_API PyObject* THPCppFunction_stream(
+    PyObject* self,
+    PyObject* noargs);
 
 TORCH_PYTHON_API PyTypeObject* _initFunctionPyTypeObject(
     PyTypeObject& type,

@@ -2,6 +2,7 @@
 #include <torch/csrc/autograd/python_cpp_function.h>
 
 #include <torch/csrc/python_headers.h>
+#include <torch/csrc/Stream.h>
 #include <cstdio>
 #include <memory>
 #include <typeindex>
@@ -207,6 +208,17 @@ static PyObject* THPCppFunction_set_sequence_nr(
   auto& fn = *((THPCppFunction*)self)->cdata;
   fn.set_sequence_nr(THPUtils_unpackUInt64(sequence_nr));
   Py_RETURN_NONE;
+  END_HANDLE_TH_ERRORS
+}
+
+PyObject* THPCppFunction_stream(PyObject* self, PyObject* noargs) {
+  HANDLE_TH_ERRORS
+  auto& fn = *((THPCppFunction*)self)->cdata;
+  auto opt_stream = fn.stream();
+  if (!opt_stream.has_value()) {
+    Py_RETURN_NONE;
+  }
+  return THPStream_Wrap(opt_stream.value());
   END_HANDLE_TH_ERRORS
 }
 
